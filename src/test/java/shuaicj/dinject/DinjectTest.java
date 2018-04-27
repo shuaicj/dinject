@@ -1,7 +1,8 @@
 package shuaicj.dinject;
 
-import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import javax.inject.Inject;
 
 import org.junit.Test;
 
@@ -68,8 +69,37 @@ public class DinjectTest {
                 .hasMessageStartingWith("no-arg constructor required for module");
     }
 
+    @SuppressWarnings("unused")
     static class ModuleDoesNotHaveNoArgConstructor {
-        @SuppressWarnings("unused")
         ModuleDoesNotHaveNoArgConstructor(int a) {}
+    }
+
+    @Test
+    public void multipleProvides() {
+        assertThatThrownBy(() -> Dinject.of(MultipleProvides.class))
+                .isInstanceOf(DinjectException.class)
+                .hasMessageStartingWith("multiple @Provides for");
+    }
+
+    @SuppressWarnings("unused")
+    static class MultipleProvides {
+
+        @Provides A a1() { return new A(); }
+        @Provides A a2() { return new A(); }
+
+        static class A {}
+    }
+
+    @Test
+    public void multipleInjectConstructors() {
+        // assertThatThrownBy(() -> Dinject.of(MultipleInjectConstructors.class))
+        //         .isInstanceOf(DinjectException.class)
+        //         .hasMessageStartingWith("multiple @Provides for");
+    }
+
+    @SuppressWarnings("unused")
+    static class MultipleInjectConstructors {
+        // @Inject MultipleInjectConstructors(String a) {}
+        // @Inject MultipleInjectConstructors(String a, String b) {}
     }
 }
