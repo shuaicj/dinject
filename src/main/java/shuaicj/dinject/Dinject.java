@@ -130,9 +130,13 @@ public final class Dinject {
         if (path.contains(id)) {
             throw new DinjectException("circular dependency " + pathToString(id, path));
         }
+        // return immediately if it's duplicate check
+        Meta meta = metas.get(id);
+        if (path.isEmpty() && meta != null && meta.executable instanceof Constructor) {
+            return;
+        }
         path.add(id);
         // ensure meta is created
-        Meta meta = metas.get(id);
         if (meta == null) {
             boolean s = id.clazz.isAnnotationPresent(Singleton.class);
             Constructor<?> c = getConstructor(id.clazz);
@@ -141,7 +145,9 @@ public final class Dinject {
         }
         // parse recursively
         for (Param p : meta.params) {
-            if (!p.provider) {
+            if (p.provider) {
+                parseDependencies(p.id, new LinkedHashSet<>());
+            } else {
                 parseDependencies(p.id, path);
             }
         }
