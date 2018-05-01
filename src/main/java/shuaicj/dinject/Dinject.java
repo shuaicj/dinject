@@ -1,5 +1,9 @@
 package shuaicj.dinject;
 
+import javax.inject.Inject;
+import javax.inject.Named;
+import javax.inject.Provider;
+import javax.inject.Singleton;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Executable;
@@ -11,17 +15,11 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Queue;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
-import javax.inject.Inject;
-import javax.inject.Named;
-import javax.inject.Provider;
-import javax.inject.Singleton;
 
 /**
  * The main class create dinject.
@@ -30,8 +28,8 @@ import javax.inject.Singleton;
  */
 public final class Dinject {
 
-    private final Map<Id<?>, Meta> metas = new ConcurrentHashMap<>();
-    private final Map<Id<?>, Object> singletons = new ConcurrentHashMap<>();
+    private final Map<Id, Meta> metas = new ConcurrentHashMap<>();
+    private final Map<Id, Object> singletons = new ConcurrentHashMap<>();
 
     public static Dinject create(Class<?>... moduleClasses) {
         return new Dinject(new HashSet<>(Arrays.asList(moduleClasses)));
@@ -42,114 +40,114 @@ public final class Dinject {
     }
 
     private Dinject(Collection<Class<?>> moduleClasses) {
-        // instance create Dinject itself is supposed to be a singleton
-        singletons.put(new Id<>(Dinject.class), this);
-
-        parseModules(moduleClasses);
-        generateDependencies();
-        metas.forEach((id, meta) -> validateDependencies(id, new LinkedHashSet<>()));
+        // instance of Dinject itself is supposed to be a singleton
+        singletons.put(new Id(Dinject.class), this);
+        // parse modules and all dependencies
+        parseModules(moduleClasses).forEach(id -> parseDependencies(id, new LinkedHashSet<>()));
     }
 
     public <T> T instance(Class<T> clazz) {
         return instance(clazz, null);
     }
 
+    @SuppressWarnings("unchecked")
     public <T> T instance(Class<T> clazz, String name) {
-        Id<T> id = new Id<>(clazz, name);
+        Id id = new Id(clazz, name);
         Object obj = singletons.get(id);
         if (obj != null) {
             return (T) obj;
         }
         Meta meta = metas.get(id);
-        if (meta != null) {
-            if (meta.singleton) {
-                synchronized (this) {
-                    obj = singletons.get(id);
-                    if (obj == null) {
-                    }
+        if (meta == null) {
+            parseDependencies(id, new LinkedHashSet<>());
+            meta = metas.get(id);
+        }
+        if (meta.singleton) {
+            synchronized (this) {
+                obj = singletons.get(id);
+                if (obj == null) {
+                    obj = instance(meta);
+                    singletons.put(id, obj);
                 }
+                return (T) obj;
             }
         }
-        return null;
+        return (T) instance(meta);
     }
 
-    private Object instance(Class<?> clazz, Meta meta) {
+    private Object instance(Meta meta) {
         Object[] params = meta.params
                 .stream()
                 .map(p -> {
                     if (p.provider) {
-                        return (Provider) () -> instance(p.id.clazz, metas.get(p.id));
-                    } else {
-                        return instance(p.id.clazz, metas.get(p.id));
+                        return (Provider) () -> instance(p.id.clazz, p.id.name);
                     }
-                })
-                .collect(Collectors.toList())
-                .toArray();
+                    return instance(p.id.clazz, p.id.name);
+                }).toArray();
 
         if (meta.executable instanceof Constructor) {
-            return instantiateByConstructor(clazz, (Constructor) meta.executable, params);
+            return instantiateByConstructor((Constructor<?>) meta.executable, params);
         }
-        return null;
+        return instantiateByMeduleMethod((Method) meta.executable, meta.module, params);
     }
 
-    private void parseModules(Iterable<Class<?>> moduleClasses) {
+    private Set<Id> parseModules(Iterable<Class<?>> moduleClasses) {
+        Set<Id> roots = new HashSet<>();
         for (Class<?> clazz : moduleClasses) {
             Constructor<?> ctor;
             try {
                 ctor = clazz.getDeclaredConstructor();
             } catch (NoSuchMethodException e) {
-                throw new DinjectException("no-arg constructor required for module " + clazz);
+                throw new DinjectException("no-arg constructor required for module " + clazz.getName());
             }
             ctor.setAccessible(true);
 
-            Object module = instantiateByConstructor(clazz, ctor);
+            Object module = instantiateByConstructor(ctor);
 
             for (Method m : clazz.getDeclaredMethods()) {
                 if (m.isAnnotationPresent(Provides.class)) {
+                    m.setAccessible(true);
                     Class<?> t = m.getReturnType();
                     String n = m.isAnnotationPresent(Named.class) ? m.getAnnotation(Named.class).value() : null;
                     boolean s = m.isAnnotationPresent(Singleton.class) || t.isAnnotationPresent(Singleton.class);
-                    Id<?> id = new Id<>(t, n);
+                    Id id = new Id(t, n);
                     if (metas.putIfAbsent(id, new Meta(s, m, getParams(m), module)) != null) {
                         throw new DinjectException("multiple @Provides for " + id);
                     }
+                    roots.add(id);
                 }
             }
         }
+        return roots;
     }
 
-    private void generateDependencies() {
-        // ensure all dependencies constructable
-        Queue<Id<?>> q = new LinkedList<>(metas.keySet());
-        while (!q.isEmpty()) {
-            Id<?> id = q.poll();
-            Meta meta = metas.get(id);
-            for (Param<?> p : meta.params) {
-                if (!metas.containsKey(p.id)) {
-                    if (p.id.name != null) {
-                        throw new DinjectException("no @Provides for " + p);
-                    }
-                    boolean s = p.id.clazz.isAnnotationPresent(Singleton.class);
-                    Constructor c = getConstructor(p.id.clazz);
-                    metas.put(p.id, new Meta(s, c, getParams(c)));
-                    q.offer(p.id);
-                }
-            }
+    private void parseDependencies(Id id, LinkedHashSet<Id> path) {
+        // exclude self
+        if (id.clazz.equals(Dinject.class)) {
+            return;
         }
-    }
-
-    private void validateDependencies(Id<?> id, LinkedHashSet<Id<?>> path) {
         // ensure no circular dependency
         if (path.contains(id)) {
             throw new DinjectException("circular dependency " + pathToString(id, path));
         }
         path.add(id);
-        for (Param<?> p : metas.get(id).params) {
-            validateDependencies(p.id, path);
+        // ensure meta is created
+        Meta meta = metas.get(id);
+        if (meta == null) {
+            boolean s = id.clazz.isAnnotationPresent(Singleton.class);
+            Constructor<?> c = getConstructor(id.clazz);
+            metas.putIfAbsent(id, new Meta(s, c, getParams(c)));
+            meta = metas.get(id);
+        }
+        // parse recursively
+        for (Param p : meta.params) {
+            if (!p.provider) {
+                parseDependencies(p.id, path);
+            }
         }
     }
 
-    private Constructor getConstructor(Class<?> clazz) {
+    private Constructor<?> getConstructor(Class<?> clazz) {
         Constructor ctor = null;
         Constructor none = null;
         for (Constructor c : clazz.getDeclaredConstructors()) {
@@ -158,14 +156,14 @@ public final class Dinject {
             }
             if (c.isAnnotationPresent(Inject.class)) {
                 if (ctor != null) {
-                    throw new DinjectException("multiple @Inject for " + clazz);
+                    throw new DinjectException("multiple @Inject for " + clazz.getName());
                 }
                 ctor = c;
             }
         }
 
         if (ctor == null && none == null) {
-            throw new DinjectException("no applicable constructor for " + clazz);
+            throw new DinjectException("no applicable constructor for " + clazz.getName());
         }
 
         ctor = ctor == null ? none : ctor;
@@ -173,16 +171,24 @@ public final class Dinject {
         return ctor;
     }
 
-    private Object instantiateByConstructor(Class<?> clazz, Constructor ctor, Object... params) {
+    private Object instantiateByConstructor(Constructor<?> ctor, Object... params) {
         try {
             return ctor.newInstance(params);
         } catch (Exception e) {
-            throw new DinjectException("cannot instantiate " + clazz + " by constructor", e);
+            throw new DinjectException("cannot instantiate " + ctor.getDeclaringClass() + " by constructor", e);
         }
     }
 
-    private List<Param<?>> getParams(Executable executable) {
-        List<Param<?>> rt = new ArrayList<>();
+    private Object instantiateByMeduleMethod(Method method, Object module, Object... params) {
+        try {
+            return method.invoke(module, params);
+        } catch (Exception e) {
+            throw new DinjectException("cannot instantiate " + method.getReturnType() + " by module method", e);
+        }
+    }
+
+    private List<Param> getParams(Executable executable) {
+        List<Param> rt = new ArrayList<>();
         Class<?>[] pt = executable.getParameterTypes();
         Type[] gt = executable.getGenericParameterTypes();
         Annotation[][] pa = executable.getParameterAnnotations();
@@ -196,15 +202,15 @@ public final class Dinject {
                     break;
                 }
             }
-            rt.add(new Param<>(new Id<>(t, n), p));
+            rt.add(new Param(new Id(t, n), p));
         }
         return rt;
     }
 
-    private String pathToString(Id<?> id, LinkedHashSet<Id<?>> path) {
+    private String pathToString(Id id, LinkedHashSet<Id> path) {
         StringBuilder s = new StringBuilder("{ ");
         boolean found = false;
-        for (Id<?> d : path) {
+        for (Id d : path) {
             if (found) {
                 s.append(" -> ");
                 s.append(d);
@@ -221,16 +227,16 @@ public final class Dinject {
         return s.toString();
     }
 
-    private static final class Id<T> {
+    private static final class Id {
 
-        private final Class<T> clazz;
+        private final Class<?> clazz;
         private final String name;
 
-        Id(Class<T> clazz) {
+        Id(Class<?> clazz) {
             this(clazz, null);
         }
 
-        Id(Class<T> clazz, String name) {
+        Id(Class<?> clazz, String name) {
             this.clazz = clazz;
             this.name = name;
         }
@@ -239,7 +245,7 @@ public final class Dinject {
         public boolean equals(Object o) {
             if (this == o) return true;
             if (o == null || getClass() != o.getClass()) return false;
-            Id<?> id = (Id<?>) o;
+            Id id = (Id) o;
             return Objects.equals(clazz, id.clazz) && Objects.equals(name, id.name);
         }
 
@@ -250,16 +256,16 @@ public final class Dinject {
 
         @Override
         public String toString() {
-            return clazz + (name == null ? "" : ":" + name);
+            return clazz.getName() + (name == null ? "" : ":" + name);
         }
     }
 
-    private static final class Param<T> {
+    private static final class Param {
 
-        private final Id<T> id;
+        private final Id id;
         private final boolean provider;
 
-        Param(Id<T> id, boolean provider) {
+        Param(Id id, boolean provider) {
             this.id = id;
             this.provider = provider;
         }
@@ -269,14 +275,14 @@ public final class Dinject {
 
         private final boolean singleton;
         private final Executable executable;
-        private final List<Param<?>> params;
+        private final List<Param> params;
         private final Object module;
 
-        Meta(boolean singleton, Executable ctor, List<Param<?>> params) {
+        Meta(boolean singleton, Executable ctor, List<Param> params) {
             this(singleton, ctor, params, null);
         }
 
-        Meta(boolean singleton, Executable method, List<Param<?>> params, Object module) {
+        Meta(boolean singleton, Executable method, List<Param> params, Object module) {
             this.singleton = singleton;
             this.executable = method;
             this.params = params;
