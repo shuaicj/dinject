@@ -5,6 +5,7 @@ package shuaicj.dinject;
  *
  * @author shuaicj 2018/04/12
  */
+@SuppressWarnings("serial")
 public class DinjectException extends RuntimeException {
 
     public DinjectException(String message) {

@@ -1,32 +1,35 @@
 package shuaicj.dinject;
 
-import javax.inject.Inject;
-import javax.inject.Named;
-import javax.inject.Provider;
-import javax.inject.Singleton;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Executable;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import javax.inject.Inject;
+import javax.inject.Named;
+import javax.inject.Provider;
+import javax.inject.Singleton;
 
 /**
  * The main class create dinject.
  *
  * @author shuaicj 2018/04/12
  */
-public final class Dinject {
+public class Dinject {
 
     private final Map<Id, Meta> metas = new ConcurrentHashMap<>();
     private final Map<Id, Object> singletons = new ConcurrentHashMap<>();
@@ -76,19 +79,25 @@ public final class Dinject {
     }
 
     private Object instance(Meta meta) {
-        Object[] params = meta.params
-                .stream()
-                .map(p -> {
-                    if (p.provider) {
-                        return (Provider) () -> instance(p.id.clazz, p.id.name);
-                    }
-                    return instance(p.id.clazz, p.id.name);
-                }).toArray();
-
-        if (meta.executable instanceof Constructor) {
-            return instantiateByConstructor((Constructor<?>) meta.executable, params);
+        Object[] params = meta.params.stream().map(this::instance).toArray();
+        Object obj = meta.executable instanceof Constructor
+                ? instantiateByConstructor((Constructor<?>) meta.executable, params)
+                : instantiateByModuleMethod((Method) meta.executable, meta.module, params);
+        for (Feeld f : meta.feelds) {
+            try {
+                f.field.set(obj, instance(f));
+            } catch (IllegalAccessException e) {
+                throw new DinjectException("cannot inject field " + f.field + " for " + f.id, e);
+            }
         }
-        return instantiateByMeduleMethod((Method) meta.executable, meta.module, params);
+        return obj;
+    }
+
+    private Object instance(Param p) {
+        if (p.provider) {
+            return (Provider) () -> instance(p.id.clazz, p.id.name);
+        }
+        return instance(p.id.clazz, p.id.name);
     }
 
     private Set<Id> parseModules(Iterable<Class<?>> moduleClasses) {
@@ -111,7 +120,7 @@ public final class Dinject {
                     String n = m.isAnnotationPresent(Named.class) ? m.getAnnotation(Named.class).value() : null;
                     boolean s = m.isAnnotationPresent(Singleton.class) || t.isAnnotationPresent(Singleton.class);
                     Id id = new Id(t, n);
-                    if (metas.putIfAbsent(id, new Meta(s, m, getParams(m), module)) != null) {
+                    if (metas.putIfAbsent(id, new Meta(s, m, getParams(m), Collections.emptyList(), module)) != null) {
                         throw new DinjectException("multiple @Provides for " + id);
                     }
                     roots.add(id);
@@ -140,15 +149,18 @@ public final class Dinject {
         if (meta == null) {
             boolean s = id.clazz.isAnnotationPresent(Singleton.class);
             Constructor<?> c = getConstructor(id.clazz);
-            metas.putIfAbsent(id, new Meta(s, c, getParams(c)));
+            metas.putIfAbsent(id, new Meta(s, c, getParams(c), getFeelds(id.clazz)));
             meta = metas.get(id);
         }
         // parse recursively
-        for (Param p : meta.params) {
+        List<Param> dependencies = new ArrayList<>(meta.params.size() + meta.feelds.size());
+        dependencies.addAll(meta.params);
+        dependencies.addAll(meta.feelds);
+        for (Param p : dependencies) {
             if (p.provider) {
                 parseDependencies(p.id, new LinkedHashSet<>());
             } else {
-                parseDependencies(p.id, path);
+                parseDependencies(p.id, new LinkedHashSet<>(path));
             }
         }
     }
@@ -185,7 +197,7 @@ public final class Dinject {
         }
     }
 
-    private Object instantiateByMeduleMethod(Method method, Object module, Object... params) {
+    private Object instantiateByModuleMethod(Method method, Object module, Object... params) {
         try {
             return method.invoke(module, params);
         } catch (Exception e) {
@@ -201,16 +213,38 @@ public final class Dinject {
         for (int i = 0; i < pt.length; i++) {
             boolean p = pt[i].equals(Provider.class);
             Class<?> t = p ? (Class<?>) ((ParameterizedType) gt[i]).getActualTypeArguments()[0] : pt[i];
-            String n = null;
-            for (Annotation a : pa[i]) {
-                if (a instanceof Named) {
-                    n = ((Named) a).value();
-                    break;
-                }
-            }
+            String n = getName(pa[i]);
             rt.add(new Param(new Id(t, n), p));
         }
         return rt;
+    }
+
+    private List<Feeld> getFeelds(Class<?> clazz) {
+        LinkedList<Feeld> rt = new LinkedList<>();
+        Set<Field> fields = new HashSet<>();
+        for (Class<?> c = clazz; c != null && !c.equals(Object.class); c = c.getSuperclass()) {
+            for (Field f : c.getDeclaredFields()) {
+                if (!fields.contains(f) && f.isAnnotationPresent(Inject.class)) {
+                    f.setAccessible(true);
+                    fields.add(f);
+                    boolean p = f.getType().equals(Provider.class);
+                    Class<?> t = p ? (Class<?>) ((ParameterizedType) f.getGenericType()).getActualTypeArguments()[0] : f.getType();
+                    String n = getName(f.getDeclaredAnnotations());
+                    // make sure that fields in parent are placed at the front of list
+                    rt.addFirst(new Feeld(f, new Id(t, n), p));
+                }
+            }
+        }
+        return rt;
+    }
+
+    private String getName(Annotation[] annotations) {
+        for (Annotation a : annotations) {
+            if (a instanceof Named) {
+                return  ((Named) a).value();
+            }
+        }
+        return null;
     }
 
     private String pathToString(Id id, LinkedHashSet<Id> path) {
@@ -233,10 +267,10 @@ public final class Dinject {
         return s.toString();
     }
 
-    private static final class Id {
+    private static class Id {
 
-        private final Class<?> clazz;
-        private final String name;
+        final Class<?> clazz;
+        final String name;
 
         Id(Class<?> clazz) {
             this(clazz, null);
@@ -266,10 +300,10 @@ public final class Dinject {
         }
     }
 
-    private static final class Param {
+    private static class Param {
 
-        private final Id id;
-        private final boolean provider;
+        final Id id;
+        final boolean provider;
 
         Param(Id id, boolean provider) {
             this.id = id;
@@ -277,21 +311,33 @@ public final class Dinject {
         }
     }
 
-    private static final class Meta {
+    private static class Feeld extends Param {
 
-        private final boolean singleton;
-        private final Executable executable;
-        private final List<Param> params;
-        private final Object module;
+        final Field field;
 
-        Meta(boolean singleton, Executable ctor, List<Param> params) {
-            this(singleton, ctor, params, null);
+        Feeld(Field field, Id id, boolean provider) {
+            super(id, provider);
+            this.field = field;
+        }
+    }
+
+    private static class Meta {
+
+        final boolean singleton;
+        final Executable executable;
+        final List<Param> params;
+        final List<Feeld> feelds;
+        final Object module;
+
+        Meta(boolean singleton, Executable ctor, List<Param> params, List<Feeld> feelds) {
+            this(singleton, ctor, params, feelds, null);
         }
 
-        Meta(boolean singleton, Executable method, List<Param> params, Object module) {
+        Meta(boolean singleton, Executable method, List<Param> params, List<Feeld> feelds, Object module) {
             this.singleton = singleton;
             this.executable = method;
             this.params = params;
+            this.feelds = feelds;
             this.module = module;
         }
     }
