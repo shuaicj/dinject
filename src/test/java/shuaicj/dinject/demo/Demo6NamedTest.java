@@ -42,6 +42,9 @@ public class Demo6NamedTest {
     public void test() {
         Dinject dinject = Dinject.create(Module.class);
         A a = dinject.instance(A.class);
-        assertThat(a.b.name).isEqualTo("b2");
+        B b1 = dinject.instance(B.class, "b1");
+        B b2 = dinject.instance(B.class, "b2");
+        assertThat(a.b.name).isEqualTo(b2.name).isEqualTo("b2");
+        assertThat(b1.name).isNotEqualTo(b2.name);
     }
 }
